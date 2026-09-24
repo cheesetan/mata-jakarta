@@ -50,7 +50,6 @@ import {
   groundColorAt,
   heightAt,
   lngLatToXZ,
-  MISSION_UNITS_PER_DEG,
 } from "./terrain";
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
@@ -683,7 +682,11 @@ function FireFront({
   const flameTex = useMemo(() => createFlameTexture(), []);
   const smokeTex = useMemo(() => createSmokeTexture(), []);
   const scorchTex = useMemo(() => createScorchTexture(), []);
-  const flameMat = useMemo(
+  const flameMatOuter = useMemo(
+    () => createBillboardMaterial(flameTex, { emissive: false }),
+    [flameTex],
+  );
+  const flameMatCore = useMemo(
     () => createBillboardMaterial(flameTex, { emissive: true }),
     [flameTex],
   );
@@ -702,6 +705,7 @@ function FireFront({
           z: Math.sin(a) * r,
           h: 2.2 + (i % 4) * 0.65 + radius * 0.14,
           w: 0.9 + (i % 3) * 0.35,
+          phase: i * 1.37,
         };
       }),
     [radius],
@@ -720,35 +724,56 @@ function FireFront({
         const slot = child as THREE.Group;
         slot.visible = i < alive;
         if (!slot.visible) return;
-        const mesh = slot.children[0]?.children[0] as THREE.Mesh | undefined;
-        if (!mesh) return;
-        const flicker = 1 + Math.sin(time * (7 - suppression * 2.5) + i) * 0.14;
-        const stretch = 1 + Math.sin(time * 9 + i * 1.7) * 0.2;
-        mesh.scale.set(
-          flameSlots[i].w * flicker,
-          flameSlots[i].h * flicker * stretch,
-          1,
+        const ph = flameSlots[i].phase;
+        const flicker = 1 + Math.sin(time * (7 - suppression * 2.5) + ph) * 0.18;
+        const stretch = 1 + Math.sin(time * 9 + ph * 1.7) * 0.24;
+        const lift = Math.sin(time * 5.5 + ph) * 0.12;
+        const sway = Math.sin(time * 2.2 + ph) * 0.22;
+        slot.position.set(
+          flameSlots[i].x + WIND_XZ.x * sway * 0.35,
+          flameSlots[i].h * 0.35 + lift,
+          flameSlots[i].z + WIND_XZ.z * sway * 0.35,
         );
-        const mat = mesh.material as THREE.MeshBasicMaterial;
-        mat.opacity = (cooling ? 0.45 : 0.92) * (0.4 + contained * 0.6);
+        const outer = slot.children[0]?.children[0] as THREE.Mesh | undefined;
+        const core = slot.children[0]?.children[1] as THREE.Mesh | undefined;
+        if (outer) {
+          outer.scale.set(
+            flameSlots[i].w * flicker,
+            flameSlots[i].h * flicker * stretch,
+            1,
+          );
+          const mat = outer.material as THREE.MeshBasicMaterial;
+          mat.opacity = (cooling ? 0.5 : 0.88) * (0.45 + contained * 0.55);
+        }
+        if (core) {
+          core.scale.set(
+            flameSlots[i].w * flicker * 0.48,
+            flameSlots[i].h * flicker * stretch * 0.55,
+            1,
+          );
+          const mat = core.material as THREE.MeshBasicMaterial;
+          mat.opacity = (cooling ? 0.35 : 0.75) * (0.4 + contained * 0.6);
+        }
       });
     }
     if (smoke.current) {
-      smoke.current.visible = suppression > 0.05 || cooling;
+      smoke.current.visible = contained > 0.08;
       smoke.current.children.forEach((child, i) => {
         const billboard = child as THREE.Group;
         const mesh = billboard.children[0] as THREE.Mesh | undefined;
         if (!mesh) return;
         const mat = mesh.material as THREE.MeshBasicMaterial;
-        const rise = (time * 0.35 + i * 0.2) % 1;
+        const rise = (time * 0.28 + i * 0.17) % 1;
+        const drift = rise * (4.5 + suppression * 2);
         billboard.position.set(
-          WIND_XZ.x * rise * 4 + Math.sin(i + time * 0.5) * 0.6,
-          1.5 + rise * 5 + i * 0.3,
-          WIND_XZ.z * rise * 4 + Math.cos(i + time * 0.4) * 0.6,
+          WIND_XZ.x * drift + Math.sin(i + time * 0.5) * 0.8,
+          1.2 + rise * 6.5 + i * 0.35,
+          WIND_XZ.z * drift + Math.cos(i + time * 0.4) * 0.8,
         );
-        mesh.scale.setScalar(1.2 + rise * 2.2);
+        mesh.scale.setScalar(1.4 + rise * 2.6);
+        const smokeBase = cooling ? 0.42 : 0.28;
         mat.opacity =
-          (cooling ? 0.35 : 0.18) * (1 - rise) * (0.35 + contained * 0.65);
+          smokeBase * (1 - rise * 0.85) * (0.3 + contained * 0.7) * (1 - suppression * 0.35);
       });
     }
     if (scorch.current) {
@@ -758,7 +783,8 @@ function FireFront({
     if (embers.current) embers.current.scale.setScalar(0.4 + contained * 0.75);
     if (steam.current) steam.current.visible = suppression > 0.08;
     if (light.current) {
-      light.current.intensity = (cooling ? 1.4 : 4.2) * contained;
+      const flicker = 0.82 + Math.sin(time * 11.5) * 0.12 + Math.sin(time * 17.3) * 0.06;
+      light.current.intensity = (cooling ? 1.4 : 4.2) * contained * flicker;
       light.current.color.set(cooling ? "#ea580c" : "#ff6600");
     }
   });
@@ -781,8 +807,11 @@ function FireFront({
         {flameSlots.map((slot, i) => (
           <group key={i} position={[slot.x, slot.h * 0.35, slot.z]}>
             <CameraBillboard>
-              <mesh material={flameMat} renderOrder={5}>
+              <mesh material={flameMatOuter} renderOrder={4}>
                 <planeGeometry args={[slot.w, slot.h]} />
+              </mesh>
+              <mesh material={flameMatCore} renderOrder={6}>
+                <planeGeometry args={[slot.w * 0.48, slot.h * 0.55]} />
               </mesh>
             </CameraBillboard>
           </group>
