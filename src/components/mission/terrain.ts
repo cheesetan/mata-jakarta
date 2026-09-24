@@ -86,45 +86,216 @@ const activeHome = drones.find((d) => d.id === ACTIVE_DRONE_ID)!.home;
 export const PAD_XZ = lngLatToXZ(activeHome[0], activeHome[1]);
 export const SPOT_XZ = lngLatToXZ(spotFire[0], spotFire[1]);
 
-export type CanalSegment = {
-  x0: number;
-  z0: number;
-  x1: number;
-  z1: number;
-  halfW: number;
+export type CanalPath = {
+  points: [number, number][];
+  /** Half-width at each centerline sample. */
+  halfW: number[];
 };
 
-export const CANALS: CanalSegment[] = [
-  { x0: -95, z0: -70, x1: 85, z1: 55, halfW: 2.8 },
-  { x0: -80, z0: 75, x1: 90, z1: -40, halfW: 2.2 },
-];
-
-function distToSegment(
-  px: number,
-  pz: number,
-  x0: number,
-  z0: number,
-  x1: number,
-  z1: number,
+function catmullRom(
+  p0: number,
+  p1: number,
+  p2: number,
+  p3: number,
+  t: number,
 ): number {
-  const dx = x1 - x0;
-  const dz = z1 - z0;
-  const len2 = dx * dx + dz * dz;
-  if (len2 < 1e-6) return Math.hypot(px - x0, pz - z0);
-  let t = ((px - x0) * dx + (pz - z0) * dz) / len2;
-  t = Math.max(0, Math.min(1, t));
-  const qx = x0 + t * dx;
-  const qz = z0 + t * dz;
-  return Math.hypot(px - qx, pz - qz);
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2 * p1 +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+  );
+}
+
+function organicWidth(
+  base: number,
+  x: number,
+  z: number,
+  fade: number,
+): number {
+  const n = valueNoise(x * 0.085 + 2.2, z * 0.085 - 1.4);
+  return base * (1 + (n - 0.5) * 0.14 * fade);
+}
+
+function densifyCanal(
+  controls: [number, number][],
+  widthAt: (u: number, x: number, z: number) => number,
+  samplesPerSeg = 10,
+): CanalPath {
+  const points: [number, number][] = [];
+  const halfW: number[] = [];
+  if (controls.length < 2) {
+    for (const p of controls) {
+      points.push(p);
+      halfW.push(widthAt(0, p[0], p[1]));
+    }
+    return { points, halfW };
+  }
+  const nSeg = controls.length - 1;
+  for (let i = 0; i < nSeg; i++) {
+    const p0 = controls[Math.max(0, i - 1)];
+    const p1 = controls[i];
+    const p2 = controls[i + 1];
+    const p3 = controls[Math.min(controls.length - 1, i + 2)];
+    for (let s = 0; s < samplesPerSeg; s++) {
+      const t = s / samplesPerSeg;
+      const x = catmullRom(p0[0], p1[0], p2[0], p3[0], t);
+      const z = catmullRom(p0[1], p1[1], p2[1], p3[1], t);
+      points.push([x, z]);
+      halfW.push(widthAt((i + t) / nSeg, x, z));
+    }
+  }
+  const end = controls[controls.length - 1];
+  points.push(end);
+  halfW.push(widthAt(1, end[0], end[1]));
+  return { points, halfW };
+}
+
+function normalAt(
+  points: [number, number][],
+  index: number,
+): [number, number] {
+  const prev = points[Math.max(0, index - 1)];
+  const next = points[Math.min(points.length - 1, index + 1)];
+  let tx = next[0] - prev[0];
+  let tz = next[1] - prev[1];
+  const len = Math.hypot(tx, tz) || 1;
+  tx /= len;
+  tz /= len;
+  return [-tz, tx];
+}
+
+/**
+ * Tributary eases onto the collector: it finishes the bend upstream,
+ * runs just beside the main stem, then the gap between them closes.
+ * The mouth sits on the collector centerline, so the channels unite
+ * instead of cutting through each other.
+ */
+function buildTributary(collector: CanalPath): CanalPath {
+  const approach = densifyCanal(
+    [
+      [-44, 102],
+      [-28, 80],
+      [-10, 60],
+      [4, 44],
+      [18, 32],
+      [32, 25],
+      [46, 21],
+    ],
+    (u, x, z) => organicWidth(1.32 + u * 0.2, x, z, 1),
+  );
+
+  const i0 = Math.max(
+    0,
+    collector.points.findIndex((p) => p[0] >= 46),
+  );
+  let i1 = collector.points.findIndex((p) => p[0] >= 64);
+  if (i1 < i0) i1 = collector.points.length - 1;
+
+  const start = approach.points[approach.points.length - 1];
+  const [nx0, nz0] = normalAt(collector.points, i0);
+  const origin = collector.points[i0];
+  const side =
+    (start[0] - origin[0]) * nx0 + (start[1] - origin[1]) * nz0;
+
+  const points = approach.points.slice(0, -1);
+  const halfW = approach.halfW.slice(0, -1);
+  const span = Math.max(1, i1 - i0);
+
+  for (let i = i0; i <= i1; i++) {
+    const u = (i - i0) / span;
+    // Close the gap promptly so the point of land is short and blunt,
+    // not a long needle between two parallel cuts.
+    const falloff = Math.pow(1 - u, 0.72);
+    if (i > i0 && Math.abs(side * falloff) < 1.1) break;
+    const [nx, nz] = normalAt(collector.points, i);
+    const [cx, cz] = collector.points[i];
+    const x = cx + nx * side * falloff;
+    const z = cz + nz * side * falloff;
+    const mouthW = collector.halfW[i];
+    // Stay the narrower branch until the mouth, then match the collector
+    // only once the centerline is already inside the main channel.
+    const widen = smoothstep(Math.min(1, Math.max(0, (u - 0.72) / 0.28)));
+    const base = THREE.MathUtils.lerp(1.48, mouthW, widen);
+    const fadeT = Math.min(1, Math.max(0, (u - 0.55) / 0.45));
+    const fade = 1 - smoothstep(fadeT);
+    points.push([x, z]);
+    halfW.push(organicWidth(base, x, z, fade));
+  }
+
+  return { points, halfW };
+}
+
+/**
+ * Collector canal with a tributary that bends parallel and merges.
+ * Downstream of the mouth the collector is wider, the way a real
+ * channel grows after a confluence.
+ */
+const collectorCanal = densifyCanal(
+  [
+    [-112, -18],
+    [-86, -30],
+    [-58, -12],
+    [-32, -10],
+    [-6, 0],
+    [18, 8],
+    [40, 14],
+    [64, 6],
+    [90, 16],
+    [116, 24],
+  ],
+  (u, x, z) => organicWidth(2.05 + u * 0.85, x, z, 0.85),
+);
+
+export const CANALS: CanalPath[] = [collectorCanal, buildTributary(collectorCanal)];
+
+/** Flat canal bed height; water ribbons sit slightly above this. */
+export const CANAL_WATERLINE = -0.42;
+/** Distance beyond canal half-width where banks meet surrounding land. */
+export const CANAL_BANK_EXT = 3.4;
+/** Water mesh width factor relative to segment halfW. */
+export const CANAL_WATER_HALF_FACTOR = 0.72;
+
+type CanalSample = { dist: number; halfW: number };
+
+function closestOnCanal(canal: CanalPath, x: number, z: number): CanalSample {
+  let bestD = Infinity;
+  let bestW = canal.halfW[0] ?? 2;
+  const pts = canal.points;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const x0 = pts[i][0];
+    const z0 = pts[i][1];
+    const x1 = pts[i + 1][0];
+    const z1 = pts[i + 1][1];
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const len2 = dx * dx + dz * dz;
+    let t = 0;
+    let d: number;
+    if (len2 < 1e-6) {
+      d = Math.hypot(x - x0, z - z0);
+    } else {
+      t = ((x - x0) * dx + (z - z0) * dz) / len2;
+      t = Math.max(0, Math.min(1, t));
+      d = Math.hypot(x - (x0 + t * dx), z - (z0 + t * dz));
+    }
+    if (d < bestD) {
+      bestD = d;
+      const w0 = canal.halfW[i];
+      const w1 = canal.halfW[i + 1] ?? w0;
+      bestW = w0 + (w1 - w0) * t;
+    }
+  }
+  return { dist: bestD, halfW: bestW };
 }
 
 export function canalDistance(x: number, z: number): number {
   let min = Infinity;
   for (const c of CANALS) {
-    min = Math.min(
-      min,
-      distToSegment(x, z, c.x0, c.z0, c.x1, c.z1),
-    );
+    min = Math.min(min, closestOnCanal(c, x, z).dist);
   }
   return min;
 }
@@ -133,7 +304,8 @@ export function isCanal(x: number, z: number): boolean {
   const [px, pz] = PAD_XZ;
   if ((x - px) ** 2 + (z - pz) ** 2 < 36 ** 2) return false;
   for (const c of CANALS) {
-    if (distToSegment(x, z, c.x0, c.z0, c.x1, c.z1) < c.halfW) return true;
+    const hit = closestOnCanal(c, x, z);
+    if (hit.dist < hit.halfW) return true;
   }
   return false;
 }
@@ -158,15 +330,41 @@ export function isPadZone(x: number, z: number): boolean {
 
 function rawLandHeight(x: number, z: number): number {
   const n = fbm(x * 0.55 + 12, z * 0.55 - 8);
-  const ridge = Math.sin(x * 0.018 + z * 0.014) * 1.1;
-  const detail = (valueNoise(x * 2.2, z * 2.2) - 0.5) * 0.45;
-  let h = (n - 0.42) * 5.2 + ridge + detail;
+  const detail = (valueNoise(x * 2.2, z * 2.2) - 0.5) * 0.28;
+  let h = (n - 0.42) * 5.0 + detail;
 
   const [sx, sz] = SPOT_XZ;
   const peatBowl = Math.exp(-((x - sx) ** 2 + (z - sz) ** 2) / 2800) * -1.35;
   h += peatBowl;
 
   return h;
+}
+
+function smoothMin(a: number, b: number, k: number): number {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.min(a, b) - h * h * k * 0.25;
+}
+
+function channelHeight(dist: number, halfW: number, landH: number): number {
+  const bankOuter = halfW + CANAL_BANK_EXT;
+  if (dist >= bankOuter) return landH;
+  const bedHalf = halfW * CANAL_WATER_HALF_FACTOR;
+  if (dist <= bedHalf) return CANAL_WATERLINE;
+  const t = (dist - bedHalf) / (bankOuter - bedHalf);
+  return THREE.MathUtils.lerp(CANAL_WATERLINE, landH, smoothstep(t));
+}
+
+function carveCanalHeight(x: number, z: number, landH: number): number {
+  const [px, pz] = PAD_XZ;
+  if ((x - px) ** 2 + (z - pz) ** 2 < 36 ** 2) return landH;
+
+  let carved = landH;
+  for (const c of CANALS) {
+    const hit = closestOnCanal(c, x, z);
+    const h = channelHeight(hit.dist, hit.halfW, landH);
+    carved = smoothMin(carved, h, 0.48);
+  }
+  return carved;
 }
 
 const PAD_FLATTEN_R = 20;
@@ -185,15 +383,6 @@ const PAD_TARGET_H = (() => {
 })();
 
 export function heightAt(x: number, z: number): number {
-  for (const c of CANALS) {
-    const d = distToSegment(x, z, c.x0, c.z0, c.x1, c.z1);
-    if (d < c.halfW) {
-      const [px, pz] = PAD_XZ;
-      if ((x - px) ** 2 + (z - pz) ** 2 < 36 ** 2) continue;
-      return -0.38 + (d / c.halfW) * 0.08;
-    }
-  }
-
   let h = rawLandHeight(x, z);
 
   const padD2 = (x - PAD_X) ** 2 + (z - PAD_Z) ** 2;
@@ -203,41 +392,90 @@ export function heightAt(x: number, z: number): number {
     h = THREE.MathUtils.lerp(h, PAD_TARGET_H, blend * 0.92);
   }
 
-  return h;
+  return carveCanalHeight(x, z, h);
 }
 
-export function groundColorAt(x: number, z: number): THREE.Color {
+export type GroundSplat = {
+  moss: number;
+  mud: number;
+  grass: number;
+  scorch: number;
+};
+
+function splatSharp(v: number): number {
+  return Math.pow(Math.max(v, 0), 1.45);
+}
+
+export function groundSplatAt(x: number, z: number): GroundSplat {
   const h = heightAt(x, z);
   const distCanal = canalDistance(x, z);
-  const bank =
-    distCanal < 5 ? THREE.MathUtils.smoothstep(5, 2.8, distCanal) : 0;
+  const bankMud =
+    distCanal < 6.5
+      ? THREE.MathUtils.smoothstep(6.5, 2.4, distCanal)
+      : 0;
 
   const [sx, sz] = SPOT_XZ;
-  const burnR = fireRadiusUnits(45) * 2.8;
+  const burnInner = fireRadiusUnits(45) * 1.65;
+  const burnOuter = fireRadiusUnits(45) * 2.75;
   const burnD = Math.hypot(x - sx, z - sz);
-  const burn = burnD < burnR ? 1 - burnD / burnR : 0;
+  const scorchRaw =
+    burnD < burnOuter
+      ? THREE.MathUtils.smoothstep(burnOuter, burnInner, burnD)
+      : 0;
 
   const dry = THREE.MathUtils.clamp(
-    valueNoise(x * 0.08 + 3, z * 0.08 - 1) * 0.6 +
-      (h < 0 ? 0.25 : 0),
+    valueNoise(x * 0.06 + 3, z * 0.06 - 1) * 0.55 +
+      (h > 0.35 ? 0.22 : 0) +
+      (h < -0.15 ? -0.12 : 0),
     0,
     1,
   );
+  const dampPatch = valueNoise(x * 0.13 + 11, z * 0.12 - 4);
+  const grassPatch = valueNoise(x * 0.19 + 2, z * 0.17 + 6);
 
+  let moss = splatSharp((1 - dry) * (0.45 + dampPatch * 0.55) * (h > -0.35 ? 1 : 0.4));
+  let mud = splatSharp(bankMud * 1.25 + (h < -0.05 ? 0.35 : 0.08) * (1 - dry * 0.4));
+  let grass = splatSharp(dry * (0.55 + grassPatch * 0.65) * (h > 0.05 ? 1.05 : 0.55));
+  let scorch = splatSharp(scorchRaw * (0.85 + valueNoise(x * 0.25, z * 0.25) * 0.15));
+
+  moss *= 1 - scorch * 0.92;
+  grass *= 1 - scorch * 0.88;
+  mud *= 1 - scorch * 0.55;
+
+  const sum = moss + mud + grass + scorch + 1e-4;
+  return {
+    moss: moss / sum,
+    mud: mud / sum,
+    grass: grass / sum,
+    scorch: scorch / sum,
+  };
+}
+
+/** Grayscale cavity AO from heightfield (for vertex attribute). */
+export function terrainAoAt(x: number, z: number): number {
+  const eps = 0.65;
+  const h = heightAt(x, z);
+  const avg =
+    (heightAt(x - eps, z) +
+      heightAt(x + eps, z) +
+      heightAt(x, z - eps) +
+      heightAt(x, z + eps)) *
+    0.25;
+  const concavity = avg - h;
+  return THREE.MathUtils.clamp(1 - concavity * 1.85, 0.76, 1);
+}
+
+export function groundColorAt(x: number, z: number): THREE.Color {
+  const splat = groundSplatAt(x, z);
   const moss = new THREE.Color("#1a3320");
-  const peat = new THREE.Color("#4a3a22");
   const mud = new THREE.Color("#3d2e1f");
   const dryGold = new THREE.Color("#5c4a28");
-  const bankMud = new THREE.Color("#2a4038");
   const scorch = new THREE.Color("#1a1008");
 
-  const base = moss.clone();
-  if (h < -0.15) base.lerp(mud, 0.55);
-  else if (h < 0.6) base.lerp(peat, 0.35 + dry * 0.4);
-  else base.lerp(dryGold, dry * 0.45);
-
-  base.lerp(bankMud, bank * 0.65);
-  base.lerp(scorch, burn * (0.55 + dry * 0.25));
+  const base = moss.clone().multiplyScalar(splat.moss);
+  base.add(mud.clone().multiplyScalar(splat.mud));
+  base.add(dryGold.clone().multiplyScalar(splat.grass));
+  base.add(scorch.clone().multiplyScalar(splat.scorch));
 
   const blotch = valueNoise(x * 0.35, z * 0.35);
   base.multiplyScalar(0.92 + blotch * 0.16);
@@ -325,4 +563,4 @@ export const WIND_XZ = (() => {
 })();
 
 export const TERRAIN_SIZE = 240;
-export const TERRAIN_SEGMENTS = 128;
+export const TERRAIN_SEGMENTS = 256;

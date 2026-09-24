@@ -1,36 +1,62 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MATA
 
-## Getting Started
+Wildfire command demo — simulated Kalimantan incident from sensor anomaly through suppression and containment.
 
-First, run the development server:
+## Development
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Firebase Hosting
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+This app is a **static export** (`output: "export"` in `next.config.ts`) served from the `out/` directory via [Firebase Hosting](https://firebase.google.com/docs/hosting).
 
-## Learn More
+### One-time setup
 
-To learn more about Next.js, take a look at the following resources:
+1. Install the Firebase CLI (or use `npx`, which the npm scripts do automatically):
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+   ```bash
+   npx -y firebase-tools@latest login
+   ```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+2. Create or select a Firebase project, then link it locally:
 
-## Deploy on Vercel
+   ```bash
+   cp .firebaserc.example .firebaserc
+   # Edit .firebaserc and set your project ID, or:
+   npx -y firebase-tools@latest use --add
+   ```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+3. Enable Hosting in the [Firebase console](https://console.firebase.google.com/) if prompted on first deploy.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Deploy
+
+```bash
+npm run deploy:firebase
+```
+
+Your site will be available at `https://<project-id>.web.app` and `https://<project-id>.firebaseapp.com`.
+
+### Local preview (production build)
+
+```bash
+npm run serve:firebase
+```
+
+Serves the built `out/` folder at [http://localhost:5000](http://localhost:5000) via the Hosting emulator.
+
+### Preview channel (optional)
+
+```bash
+npm run build
+npx -y firebase-tools@latest hosting:channel:deploy preview --expires 7d
+```
+
+## Stack
+
+- [Next.js](https://nextjs.org) (App Router, static export)
+- MapLibre GL, React Three Fiber, Tailwind CSS

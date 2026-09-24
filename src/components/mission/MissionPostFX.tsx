@@ -2,25 +2,37 @@
 
 import {
   Bloom,
+  BrightnessContrast,
   EffectComposer,
-  SMAA,
-  ToneMapping,
+  HueSaturation,
+  N8AO,
   Vignette,
 } from "@react-three/postprocessing";
-import { ToneMappingMode } from "postprocessing";
+import { useMissionQuality } from "./mission-quality";
 
 export function MissionPostFX() {
+  const { enableAo } = useMissionQuality();
+
   return (
-    <EffectComposer multisampling={0}>
-      <SMAA />
+    <EffectComposer multisampling={4}>
+      {enableAo ? (
+        <N8AO
+          aoRadius={0.35}
+          intensity={1.4}
+          quality="low"
+          halfRes
+          depthAwareUpsampling
+        />
+      ) : null}
       <Bloom
-        luminanceThreshold={0.82}
-        luminanceSmoothing={0.35}
-        intensity={0.42}
+        luminanceThreshold={0.94}
+        luminanceSmoothing={0.45}
+        intensity={0.22}
         mipmapBlur
       />
-      <Vignette offset={0.28} darkness={0.38} eskil={false} />
-      <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+      <HueSaturation hue={0.02} saturation={0.08} />
+      <BrightnessContrast brightness={0.02} contrast={0.06} />
+      <Vignette offset={0.26} darkness={0.36} eskil={false} />
     </EffectComposer>
   );
 }

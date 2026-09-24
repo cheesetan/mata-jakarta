@@ -34,7 +34,7 @@ export function IndonesiaLocator({
   const dot = pilotDotPercent();
 
   return (
-    <div className="pointer-events-auto absolute bottom-3 left-3 z-10 w-[148px] overflow-hidden rounded-lg border border-white/20 bg-black/70 shadow-lg backdrop-blur-md">
+    <div className="pointer-events-auto absolute bottom-3 left-3 z-10 w-[120px] overflow-hidden rounded-lg border border-white/20 bg-black/70 shadow-lg backdrop-blur-md">
       <button
         type="button"
         onClick={viewMode === "sector" ? onSelectNation : onSelectSector}
@@ -45,7 +45,7 @@ export function IndonesiaLocator({
             : "Zoom to Kalimantan sector"
         }
       >
-        <div className="relative h-[88px] w-full overflow-hidden bg-[#0a1628]">
+        <div className="relative h-[64px] w-full overflow-hidden bg-[#0a1628]">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={LOCATOR_IMAGE}
@@ -59,15 +59,9 @@ export function IndonesiaLocator({
             aria-hidden
           />
         </div>
-        <div className="border-t border-white/10 px-2 py-1.5">
-          <p className="text-[9px] uppercase tracking-wide text-white/45">
-            Indonesia overview
-          </p>
-          <p className="text-[11px] font-medium text-white/90">
-            {viewMode === "sector" ? "Sector active" : "Nation view"}
-          </p>
+        <div className="border-t border-white/10 px-2 py-1">
           <p className="text-[10px] text-emerald-400/90 group-hover:text-emerald-300">
-            {viewMode === "sector" ? "Tap for full nation →" : "Tap for sector →"}
+            {viewMode === "sector" ? "Show all Indonesia →" : "Back to sector →"}
           </p>
         </div>
       </button>

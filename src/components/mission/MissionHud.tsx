@@ -108,8 +108,8 @@ export function MissionHud() {
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10 flex flex-col justify-between p-4">
-      <div className="flex flex-col gap-2">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-col gap-2">
           <div className="rounded-lg border border-cyan-500/30 bg-black/70 px-4 py-2 backdrop-blur-md">
             <p className="text-[10px] uppercase tracking-wide text-cyan-300/70">
               MATA-07 · Mission HUD
@@ -118,30 +118,32 @@ export function MissionHud() {
               L{level} · {LEVEL_LABELS[level]}
             </p>
           </div>
-          <div className="flex items-start gap-2">
-            <ThermalFeed />
-            <div className="rounded-lg border border-white/10 bg-black/70 px-4 py-2 font-mono text-sm backdrop-blur-md">
-              <p className="text-white/50">Payload</p>
-              <p className="text-xl text-emerald-300">{payload.toFixed(0)}%</p>
-              <p className="text-xs text-white/40">{briefing.payloadLiters} L max</p>
-            </div>
+          <div
+            className={`rounded-lg border px-4 py-2 text-sm backdrop-blur-md ${
+              contained
+                ? "border-emerald-500/40 bg-emerald-950/70 text-emerald-100"
+                : "border-amber-500/30 bg-black/70 text-amber-100"
+            }`}
+          >
+            <span className="text-[10px] uppercase tracking-wide opacity-70">
+              Decision
+            </span>
+            <p className="font-medium">{decision}</p>
           </div>
         </div>
-        <div
-          className={`max-w-md rounded-lg border px-4 py-2 text-sm backdrop-blur-md ${
-            contained
-              ? "border-emerald-500/40 bg-emerald-950/70 text-emerald-100"
-              : "border-amber-500/30 bg-black/70 text-amber-100"
-          }`}
-        >
-          <span className="text-[10px] uppercase tracking-wide opacity-70">
-            Decision
-          </span>
-          <p className="font-medium">{decision}</p>
+        <div className="flex flex-col items-end gap-2">
+          <div className="rounded-lg border border-white/10 bg-black/70 px-4 py-2 font-mono text-sm backdrop-blur-md">
+            <p className="text-white/50">Payload</p>
+            <p className="text-xl text-emerald-300">{payload.toFixed(0)}%</p>
+            <p className="text-xs text-white/40">
+              {briefing.payloadLiters} L · {briefing.payloadLabel}
+            </p>
+          </div>
+          <ThermalFeed />
         </div>
       </div>
       <p className="w-fit rounded-md border border-white/10 bg-black/60 px-3 py-1.5 font-mono text-[11px] text-white/70 backdrop-blur-md">
-        WASD move · Q/E turn · Space up · Shift down · Ctrl faster
+        WASD move · Arrow keys look · Space up · Shift down · Ctrl faster
       </p>
     </div>
   );

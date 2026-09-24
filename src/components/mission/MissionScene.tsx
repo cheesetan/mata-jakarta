@@ -10,48 +10,76 @@ import {
 } from "@/lib/incident-math";
 import { usePlayback } from "@/store/playback";
 import {
+  Environment,
   Line,
   OrbitControls,
   PerspectiveCamera,
   Sky,
   Sparkles,
+  useGLTF,
+  useTexture,
 } from "@react-three/drei";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ReactNode,
+} from "react";
 import * as THREE from "three";
 import {
-  applyInstanceWind,
   createBillboardMaterial,
-  createFlameTexture,
-  createGrassBladeTexture,
-  createPalmFrondTexture,
-  createRotorBlurTexture,
+  createFlameFlipbookTexture,
+  createLitSmokeMaterial,
   createScorchTexture,
   createSmokeTexture,
-  createTerrainMaterial,
-  createTerrainNormalMap,
+  createSplatTerrainMaterial,
   createWaterMaterial,
   SUN_POSITION,
   sunDirection,
   taperTubeInPlace,
-  updateWindUniforms,
 } from "./mission-graphics";
+import {
+  configureTerrainTextureSet,
+  MISSION_HDRI,
+  MISSION_MODELS,
+  MISSION_TEXTURES,
+  preloadMissionAssets,
+} from "./mission-assets";
+import { MissionDroneModel } from "./mission-drone";
 import { MissionPostFX } from "./MissionPostFX";
+import { MissionForest, MissionGrassField } from "./mission-vegetation";
+import {
+  MissionPerformance,
+  MissionQualityProvider,
+  useMissionQuality,
+} from "./mission-quality";
 import {
   CANALS,
+  CANAL_WATERLINE,
+  CANAL_WATER_HALF_FACTOR,
   PAD_XZ,
   SPOT_XZ,
   TERRAIN_SEGMENTS,
   TERRAIN_SIZE,
   WIND_XZ,
-  buildForestInstances,
-  buildGrassInstances,
   fireRadiusUnits,
-  groundColorAt,
+  groundSplatAt,
   heightAt,
   lngLatToXZ,
+  terrainAoAt,
 } from "./terrain";
 
+preloadMissionAssets();
+
+/** Spherical phi on camera→target vector: 0 = up, π/2 = horizon, π = down. */
+const MAP_LOOK_PITCH_MIN = 0.08;
+const MAP_LOOK_PITCH_MAX = Math.PI - 0.08;
+/** OrbitControls polar limits for offset (target → camera); inverse of look pitch. */
+const MAP_ORBIT_POLAR_MIN = Math.PI - MAP_LOOK_PITCH_MAX;
+const MAP_ORBIT_POLAR_MAX = Math.PI - MAP_LOOK_PITCH_MIN;
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
 const MISSION_VIEW = (() => {
@@ -161,7 +189,116 @@ function SceneLabel({
 }
 
 function Terrain() {
-  const { geom, material } = useMemo(() => {
+  const { gl } = useThree();
+  const [
+    mossMap,
+    mossNor,
+    mossRough,
+    mudMap,
+    mudNor,
+    mudRough,
+    grassMap,
+    grassNor,
+    grassRough,
+    scorchMap,
+    scorchNor,
+    scorchRough,
+  ] = useTexture([
+    MISSION_TEXTURES.moss.map,
+    MISSION_TEXTURES.moss.normalMap,
+    MISSION_TEXTURES.moss.roughnessMap,
+    MISSION_TEXTURES.mud.map,
+    MISSION_TEXTURES.mud.normalMap,
+    MISSION_TEXTURES.mud.roughnessMap,
+    MISSION_TEXTURES.grass.map,
+    MISSION_TEXTURES.grass.normalMap,
+    MISSION_TEXTURES.grass.roughnessMap,
+    MISSION_TEXTURES.scorch.map,
+    MISSION_TEXTURES.scorch.normalMap,
+    MISSION_TEXTURES.scorch.roughnessMap,
+  ]);
+
+  useLayoutEffect(() => {
+    const maxAniso = Math.min(8, gl.capabilities.getMaxAnisotropy());
+    for (const tex of [
+      mossMap,
+      mossNor,
+      mossRough,
+      mudMap,
+      mudNor,
+      mudRough,
+      grassMap,
+      grassNor,
+      grassRough,
+      scorchMap,
+      scorchNor,
+      scorchRough,
+    ]) {
+      tex.anisotropy = maxAniso;
+    }
+  }, [
+    gl,
+    mossMap,
+    mossNor,
+    mossRough,
+    mudMap,
+    mudNor,
+    mudRough,
+    grassMap,
+    grassNor,
+    grassRough,
+    scorchMap,
+    scorchNor,
+    scorchRough,
+  ]);
+
+  const material = useMemo(() => {
+    configureTerrainTextureSet({
+      map: mossMap,
+      normalMap: mossNor,
+      roughnessMap: mossRough,
+    });
+    configureTerrainTextureSet({
+      map: mudMap,
+      normalMap: mudNor,
+      roughnessMap: mudRough,
+    });
+    configureTerrainTextureSet({
+      map: grassMap,
+      normalMap: grassNor,
+      roughnessMap: grassRough,
+    });
+    configureTerrainTextureSet({
+      map: scorchMap,
+      normalMap: scorchNor,
+      roughnessMap: scorchRough,
+    });
+    return createSplatTerrainMaterial({
+      moss: { map: mossMap, normalMap: mossNor, roughnessMap: mossRough },
+      mud: { map: mudMap, normalMap: mudNor, roughnessMap: mudRough },
+      grass: { map: grassMap, normalMap: grassNor, roughnessMap: grassRough },
+      scorch: {
+        map: scorchMap,
+        normalMap: scorchNor,
+        roughnessMap: scorchRough,
+      },
+    });
+  }, [
+    mossMap,
+    mossNor,
+    mossRough,
+    mudMap,
+    mudNor,
+    mudRough,
+    grassMap,
+    grassNor,
+    grassRough,
+    scorchMap,
+    scorchNor,
+    scorchRough,
+  ]);
+
+  const geom = useMemo(() => {
     const g = new THREE.PlaneGeometry(
       TERRAIN_SIZE,
       TERRAIN_SIZE,
@@ -170,19 +307,23 @@ function Terrain() {
     );
     g.rotateX(-Math.PI / 2);
     const pos = g.attributes.position;
-    const colors: number[] = [];
+    const splats: number[] = [];
+    const aos: number[] = [];
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i);
       const z = pos.getZ(i);
-      const y = heightAt(x, z);
-      pos.setY(i, y);
-      const c = groundColorAt(x, z);
-      colors.push(c.r, c.g, c.b);
+      pos.setY(i, heightAt(x, z));
+
+      const splat = groundSplatAt(x, z);
+      splats.push(splat.moss, splat.mud, splat.grass, splat.scorch);
+      aos.push(terrainAoAt(x, z));
     }
-    g.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+
+    g.setAttribute("splat", new THREE.Float32BufferAttribute(splats, 4));
+    g.setAttribute("terrainAo", new THREE.Float32BufferAttribute(aos, 1));
     g.computeVertexNormals();
-    const normalMap = createTerrainNormalMap();
-    return { geom: g, material: createTerrainMaterial(normalMap) };
+    g.computeTangents();
+    return g;
   }, []);
 
   return (
@@ -191,34 +332,38 @@ function Terrain() {
 }
 
 function buildCanalRibbonGeometry(
-  x0: number,
-  z0: number,
-  x1: number,
-  z1: number,
-  halfW: number,
-  segments = 56,
+  points: [number, number][],
+  halfW: number[],
 ): THREE.BufferGeometry {
-  const dx = x1 - x0;
-  const dz = z1 - z0;
-  const len = Math.hypot(dx, dz) || 1;
-  const ux = dx / len;
-  const uz = dz / len;
-  const px = -uz;
-  const pz = ux;
+  const y = CANAL_WATERLINE + 0.05;
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
-  const w = halfW * 0.92;
+  let dist = 0;
 
-  for (let i = 0; i <= segments; i++) {
-    const t = i / segments;
-    const cx = x0 + dx * t;
-    const cz = z0 + dz * t;
-    const y = heightAt(cx, cz) + 0.04;
+  for (let i = 0; i < points.length; i++) {
+    const [cx, cz] = points[i];
+    const w = (halfW[i] ?? halfW[halfW.length - 1] ?? 2) * CANAL_WATER_HALF_FACTOR;
+    const prev = points[Math.max(0, i - 1)];
+    const next = points[Math.min(points.length - 1, i + 1)];
+    let tx = next[0] - prev[0];
+    let tz = next[1] - prev[1];
+    const tlen = Math.hypot(tx, tz) || 1;
+    tx /= tlen;
+    tz /= tlen;
+    const px = -tz;
+    const pz = tx;
+
+    if (i > 0) {
+      dist += Math.hypot(cx - points[i - 1][0], cz - points[i - 1][1]);
+    }
+
     positions.push(cx + px * w, y, cz + pz * w);
     positions.push(cx - px * w, y, cz - pz * w);
-    uvs.push(t, 0, t, 1);
-    if (i < segments) {
+    const u = dist * 0.04;
+    uvs.push(u, 0, u, 1);
+
+    if (i < points.length - 1) {
       const a = i * 2;
       indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
     }
@@ -234,16 +379,17 @@ function buildCanalRibbonGeometry(
 
 function CanalWater() {
   const geoms = useMemo(
-    () =>
-      CANALS.map((c) =>
-        buildCanalRibbonGeometry(c.x0, c.z0, c.x1, c.z1, c.halfW),
-      ),
+    () => CANALS.map((c) => buildCanalRibbonGeometry(c.points, c.halfW)),
     [],
   );
   const material = useMemo(() => createWaterMaterial(), []);
+  const materialRef = useRef(material);
+  useLayoutEffect(() => {
+    materialRef.current = material;
+  }, [material]);
 
   useFrame(({ clock }) => {
-    material.uniforms.uTime.value = clock.elapsedTime;
+    materialRef.current.uniforms.uTime.value = clock.elapsedTime;
   });
 
   return (
@@ -251,231 +397,6 @@ function CanalWater() {
       {geoms.map((geom, i) => (
         <mesh key={i} geometry={geom} material={material} receiveShadow />
       ))}
-    </group>
-  );
-}
-
-function Forest() {
-  const trees = useMemo(() => buildForestInstances(), []);
-  const broadLower = useRef<THREE.InstancedMesh>(null);
-  const broadUpper = useRef<THREE.InstancedMesh>(null);
-  const broadTrunk = useRef<THREE.InstancedMesh>(null);
-  const shrubs = useRef<THREE.InstancedMesh>(null);
-  const palmTrunk = useRef<THREE.InstancedMesh>(null);
-  const palmFrond = useRef<THREE.InstancedMesh>(null);
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-
-  const broad = useMemo(() => trees.filter((t) => t.kind === "broadleaf"), [trees]);
-  const shrubList = useMemo(() => trees.filter((t) => t.kind === "shrub"), [trees]);
-  const palmList = useMemo(() => trees.filter((t) => t.kind === "palm"), [trees]);
-
-  const canopyMat = useMemo(() => {
-    const m = new THREE.MeshStandardMaterial({ roughness: 0.88, vertexColors: true });
-    applyInstanceWind(m);
-    return m;
-  }, []);
-  const shrubMat = useMemo(() => {
-    const m = new THREE.MeshStandardMaterial({ roughness: 0.9, vertexColors: true });
-    applyInstanceWind(m);
-    return m;
-  }, []);
-  const palmFrondMat = useMemo(() => {
-    const map = createPalmFrondTexture();
-    return new THREE.MeshStandardMaterial({
-      map,
-      alphaMap: map,
-      transparent: true,
-      color: "#15803d",
-      roughness: 0.95,
-      side: THREE.DoubleSide,
-    });
-  }, []);
-
-  const windMaterials = useMemo(
-    () => [canopyMat, shrubMat],
-    [canopyMat, shrubMat],
-  );
-
-  useLayoutEffect(() => {
-    broad.forEach((t, i) => {
-      const green = new THREE.Color().setHSL(0.32 + t.hue * 0.06, 0.55, 0.22 + t.hue * 0.08);
-      dummy.position.set(t.x, t.y + 0.9 * t.scale, t.z);
-      dummy.scale.set(t.scale * 1.05, t.scale * 1.1, t.scale * 1.05);
-      dummy.updateMatrix();
-      broadLower.current!.setMatrixAt(i, dummy.matrix);
-      broadLower.current!.setColorAt(i, green);
-
-      dummy.position.set(t.x, t.y + 1.65 * t.scale, t.z);
-      dummy.scale.set(t.scale * 0.82, t.scale * 1.05, t.scale * 0.82);
-      dummy.updateMatrix();
-      broadUpper.current!.setMatrixAt(i, dummy.matrix);
-      broadUpper.current!.setColorAt(i, green.clone().offsetHSL(0, 0, 0.06));
-
-      dummy.position.set(t.x, t.y + 0.35 * t.scale, t.z);
-      dummy.scale.set(0.22 * t.scale, 0.75 * t.scale, 0.22 * t.scale);
-      dummy.updateMatrix();
-      broadTrunk.current!.setMatrixAt(i, dummy.matrix);
-    });
-    if (broadLower.current) {
-      broadLower.current.instanceMatrix.needsUpdate = true;
-      if (broadLower.current.instanceColor) broadLower.current.instanceColor.needsUpdate = true;
-    }
-    if (broadUpper.current) {
-      broadUpper.current.instanceMatrix.needsUpdate = true;
-      if (broadUpper.current.instanceColor) broadUpper.current.instanceColor.needsUpdate = true;
-    }
-    if (broadTrunk.current) broadTrunk.current.instanceMatrix.needsUpdate = true;
-
-    shrubList.forEach((t, i) => {
-      const green = new THREE.Color().setHSL(0.34 + t.hue * 0.04, 0.5, 0.18);
-      dummy.position.set(t.x, t.y + 0.35 * t.scale, t.z);
-      dummy.scale.setScalar(t.scale * 0.55);
-      dummy.updateMatrix();
-      shrubs.current!.setMatrixAt(i, dummy.matrix);
-      shrubs.current!.setColorAt(i, green);
-    });
-    if (shrubs.current) {
-      shrubs.current.instanceMatrix.needsUpdate = true;
-      if (shrubs.current.instanceColor) shrubs.current.instanceColor.needsUpdate = true;
-    }
-
-    palmList.forEach((t, i) => {
-      dummy.position.set(t.x, t.y + 1.1 * t.scale, t.z);
-      dummy.scale.set(0.18 * t.scale, 2.2 * t.scale, 0.18 * t.scale);
-      dummy.updateMatrix();
-      palmTrunk.current!.setMatrixAt(i, dummy.matrix);
-
-      dummy.position.set(t.x, t.y + 2.35 * t.scale, t.z);
-      dummy.rotation.set(-0.35, t.phase, 0);
-      dummy.scale.set(t.scale * 1.8, t.scale * 1.8, 1);
-      dummy.updateMatrix();
-      palmFrond.current!.setMatrixAt(i, dummy.matrix);
-      dummy.rotation.set(0, 0, 0);
-    });
-    if (palmTrunk.current) palmTrunk.current.instanceMatrix.needsUpdate = true;
-    if (palmFrond.current) palmFrond.current.instanceMatrix.needsUpdate = true;
-  }, [broad, shrubList, palmList, dummy]);
-
-  useFrame(({ clock }) => {
-    updateWindUniforms(windMaterials, clock.elapsedTime);
-  });
-
-  return (
-    <group>
-      <instancedMesh
-        ref={broadLower}
-        args={[undefined, undefined, broad.length]}
-        castShadow
-        receiveShadow
-        material={canopyMat}
-      >
-        <coneGeometry args={[1, 1.4, 6]} />
-      </instancedMesh>
-      <instancedMesh
-        ref={broadUpper}
-        args={[undefined, undefined, broad.length]}
-        castShadow
-        receiveShadow
-        material={canopyMat}
-      >
-        <coneGeometry args={[1, 1.2, 6]} />
-      </instancedMesh>
-      <instancedMesh
-        ref={broadTrunk}
-        args={[undefined, undefined, broad.length]}
-        castShadow
-      >
-        <cylinderGeometry args={[1, 1.15, 1, 6]} />
-        <meshStandardMaterial color="#422006" roughness={1} />
-      </instancedMesh>
-      <instancedMesh
-        ref={shrubs}
-        args={[undefined, undefined, shrubList.length]}
-        castShadow
-        receiveShadow
-        material={shrubMat}
-      >
-        <icosahedronGeometry args={[1, 0]} />
-      </instancedMesh>
-      <instancedMesh ref={palmTrunk} args={[undefined, undefined, palmList.length]} castShadow>
-        <cylinderGeometry args={[1, 1.3, 1, 6]} />
-        <meshStandardMaterial color="#57534e" roughness={0.95} />
-      </instancedMesh>
-      <instancedMesh
-        ref={palmFrond}
-        args={[undefined, undefined, palmList.length]}
-        castShadow
-        material={palmFrondMat}
-      >
-        <planeGeometry args={[1.6, 1.6]} />
-      </instancedMesh>
-    </group>
-  );
-}
-
-function GrassField() {
-  const blades = useMemo(() => buildGrassInstances(), []);
-  const meshA = useRef<THREE.InstancedMesh>(null);
-  const meshB = useRef<THREE.InstancedMesh>(null);
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-  const grassMap = useMemo(() => createGrassBladeTexture(), []);
-
-  useLayoutEffect(() => {
-    blades.forEach((b, i) => {
-      const h = 0.9 * b.scale;
-      dummy.position.set(b.x, b.y + h * 0.45, b.z);
-      dummy.rotation.set(0, b.rotY, 0);
-      dummy.scale.set(0.35 * b.scale, h, 1);
-      dummy.updateMatrix();
-      meshA.current!.setMatrixAt(i, dummy.matrix);
-      dummy.rotation.set(0, b.rotY + Math.PI / 2, 0);
-      dummy.updateMatrix();
-      meshB.current!.setMatrixAt(i, dummy.matrix);
-    });
-    meshA.current!.instanceMatrix.needsUpdate = true;
-    meshB.current!.instanceMatrix.needsUpdate = true;
-  }, [blades, dummy]);
-
-  useFrame(({ clock }) => {
-    const t = clock.elapsedTime;
-    blades.forEach((b, i) => {
-      const sway =
-        Math.sin(t * 1.35 + b.phase) * 0.1 * (WIND_XZ.x + WIND_XZ.z);
-      const h = 0.9 * b.scale;
-      dummy.position.set(b.x + sway, b.y + h * 0.45, b.z + sway * 0.4);
-      dummy.rotation.set(0, b.rotY, sway * 0.15);
-      dummy.scale.set(0.35 * b.scale, h, 1);
-      dummy.updateMatrix();
-      meshA.current!.setMatrixAt(i, dummy.matrix);
-      dummy.rotation.set(0, b.rotY + Math.PI / 2, sway * 0.12);
-      dummy.updateMatrix();
-      meshB.current!.setMatrixAt(i, dummy.matrix);
-    });
-    meshA.current!.instanceMatrix.needsUpdate = true;
-    meshB.current!.instanceMatrix.needsUpdate = true;
-  });
-
-  const mat = useMemo(
-    () =>
-      new THREE.MeshStandardMaterial({
-        map: grassMap,
-        alphaMap: grassMap,
-        transparent: true,
-        roughness: 1,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      }),
-    [grassMap],
-  );
-
-  return (
-    <group>
-      <instancedMesh ref={meshA} args={[undefined, undefined, blades.length]} material={mat}>
-        <planeGeometry args={[1, 1]} />
-      </instancedMesh>
-      <instancedMesh ref={meshB} args={[undefined, undefined, blades.length]} material={mat}>
-        <planeGeometry args={[1, 1]} />
-      </instancedMesh>
     </group>
   );
 }
@@ -493,6 +414,15 @@ function LandingPad() {
   const [px, pz] = PAD_XZ;
   const y = heightAt(px, pz) + 0.12;
   const beacon = useRef<THREE.Mesh>(null);
+  const [concreteMap] = useTexture([MISSION_TEXTURES.mud.map]);
+  const padConcrete = useMemo(() => {
+    const t = concreteMap.clone();
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(3, 3);
+    return t;
+  }, [concreteMap]);
+  const shelter = useGLTF(MISSION_MODELS.shelter);
+  const shelterScene = useMemo(() => shelter.scene.clone(true), [shelter.scene]);
 
   useFrame(({ clock }) => {
     if (!beacon.current) return;
@@ -513,7 +443,7 @@ function LandingPad() {
     <group position={[px, y, pz]}>
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <circleGeometry args={[14, 48]} />
-        <meshStandardMaterial color="#4b5563" roughness={0.92} />
+        <meshStandardMaterial map={padConcrete} roughness={0.88} metalness={0.08} />
       </mesh>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.04, 0]} receiveShadow>
         <circleGeometry args={[8.2, 48]} />
@@ -547,14 +477,9 @@ function LandingPad() {
           <meshStandardMaterial color="#fbbf24" emissive="#f59e0b" emissiveIntensity={0.9} />
         </mesh>
       ))}
-      <mesh position={[6.6, 1.2, 3.6]} castShadow>
-        <boxGeometry args={[4.4, 2.4, 3]} />
-        <meshStandardMaterial color="#0f172a" metalness={0.4} roughness={0.5} />
-      </mesh>
-      <mesh position={[6.6, 2.5, 3.6]}>
-        <boxGeometry args={[4.6, 0.22, 3.2]} />
-        <meshStandardMaterial color="#0f766e" emissive="#115e59" emissiveIntensity={0.25} />
-      </mesh>
+      <group position={[6.6, 0, 3.6]} scale={1.05}>
+        <primitive object={shelterScene} />
+      </group>
       <mesh position={[-6.2, 5.6, -4.4]} castShadow>
         <cylinderGeometry args={[0.1, 0.16, 11.2, 8]} />
         <meshStandardMaterial color="#334155" metalness={0.5} roughness={0.4} />
@@ -679,9 +604,16 @@ function FireFront({
   const steam = useRef<THREE.Group>(null);
   const groundY = heightAt(center[0], center[2]) + 0.08;
 
-  const flameTex = useMemo(() => createFlameTexture(), []);
+  const flameTex = useMemo(() => createFlameFlipbookTexture(8), []);
+  const flameTexRef = useRef(flameTex);
+  useLayoutEffect(() => {
+    flameTexRef.current = flameTex;
+  }, [flameTex]);
   const smokeTex = useMemo(() => createSmokeTexture(), []);
   const scorchTex = useMemo(() => createScorchTexture(), []);
+  const flameFrames =
+    (flameTex as THREE.Texture & { userData?: { frames?: number } }).userData
+      ?.frames ?? 8;
   const flameMatOuter = useMemo(
     () => createBillboardMaterial(flameTex, { emissive: false }),
     [flameTex],
@@ -691,7 +623,7 @@ function FireFront({
     [flameTex],
   );
   const smokeMat = useMemo(
-    () => createBillboardMaterial(smokeTex),
+    () => createLitSmokeMaterial(smokeTex),
     [smokeTex],
   );
 
@@ -716,6 +648,8 @@ function FireFront({
     const contained = 1 - suppression * 0.68;
     const cooling = suppression > 0.35;
     const time = clock.elapsedTime;
+    const frame = Math.floor(time * 14) % flameFrames;
+    flameTexRef.current.offset.x = frame / flameFrames;
 
     if (flames.current) {
       flames.current.scale.set(contained, 0.45 + contained * 0.55, contained);
@@ -762,18 +696,23 @@ function FireFront({
         const billboard = child as THREE.Group;
         const mesh = billboard.children[0] as THREE.Mesh | undefined;
         if (!mesh) return;
-        const mat = mesh.material as THREE.MeshBasicMaterial;
-        const rise = (time * 0.28 + i * 0.17) % 1;
-        const drift = rise * (4.5 + suppression * 2);
+        const mat = mesh.material as THREE.ShaderMaterial;
+        const rise = (time * 0.22 + i * 0.13) % 1;
+        const drift = rise * (8 + suppression * 3);
         billboard.position.set(
-          WIND_XZ.x * drift + Math.sin(i + time * 0.5) * 0.8,
-          1.2 + rise * 6.5 + i * 0.35,
-          WIND_XZ.z * drift + Math.cos(i + time * 0.4) * 0.8,
+          WIND_XZ.x * drift + Math.sin(i + time * 0.5) * 1.2,
+          1.4 + rise * 34 + i * 0.55,
+          WIND_XZ.z * drift + Math.cos(i + time * 0.4) * 1.2,
         );
-        mesh.scale.setScalar(1.4 + rise * 2.6);
-        const smokeBase = cooling ? 0.42 : 0.28;
-        mat.opacity =
-          smokeBase * (1 - rise * 0.85) * (0.3 + contained * 0.7) * (1 - suppression * 0.35);
+        mesh.scale.setScalar(2.2 + rise * 4.8);
+        const smokeBase = cooling ? 0.48 : 0.34;
+        if (mat.uniforms?.uOpacity) {
+          mat.uniforms.uOpacity.value =
+            smokeBase *
+            (1 - rise * 0.88) *
+            (0.32 + contained * 0.68) *
+            (1 - suppression * 0.35);
+        }
       });
     }
     if (scorch.current) {
@@ -796,11 +735,11 @@ function FireFront({
         <meshStandardMaterial
           map={scorchTex}
           color="#ffffff"
-          emissive="#3d1a08"
-          emissiveIntensity={0.35}
+          emissive="#5c2a0c"
+          emissiveIntensity={0.55}
           roughness={1}
           transparent
-          opacity={0.95}
+          opacity={0.96}
         />
       </mesh>
       <group ref={flames}>
@@ -818,10 +757,10 @@ function FireFront({
         ))}
       </group>
       <group ref={smoke}>
-        {Array.from({ length: 8 }).map((_, i) => (
+        {Array.from({ length: 14 }).map((_, i) => (
           <CameraBillboard key={i}>
             <mesh material={smokeMat}>
-              <planeGeometry args={[2.4, 2.4]} />
+              <planeGeometry args={[3.6, 3.6]} />
             </mesh>
           </CameraBillboard>
         ))}
@@ -891,20 +830,58 @@ function WaterStream() {
   const drops = useRef<THREE.InstancedMesh>(null);
   const splash = useRef<THREE.Group>(null);
   const jetMap = useMemo(() => createJetTexture(), []);
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-  const nozzle = useMemo(() => new THREE.Vector3(), []);
-  const impact = useMemo(() => new THREE.Vector3(), []);
-  const ctrl = useMemo(() => new THREE.Vector3(), []);
-  const side = useMemo(() => new THREE.Vector3(), []);
-  const chord = useMemo(() => new THREE.Vector3(), []);
+  const jetMapRef = useRef(jetMap);
+  useLayoutEffect(() => {
+    jetMapRef.current = jetMap;
+  }, [jetMap]);
+  const outerJetMat = useMemo(
+    () =>
+      new THREE.MeshPhysicalMaterial({
+        map: jetMap,
+        color: "#7dd3fc",
+        transparent: true,
+        opacity: 0.42,
+        transmission: 0.62,
+        thickness: 0.35,
+        roughness: 0.06,
+        ior: 1.33,
+        emissive: "#38bdf8",
+        emissiveIntensity: 0.1,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    [jetMap],
+  );
+  const innerJetMat = useMemo(
+    () =>
+      new THREE.MeshPhysicalMaterial({
+        color: "#f8fdff",
+        transparent: true,
+        opacity: 0.48,
+        transmission: 0.78,
+        thickness: 0.22,
+        roughness: 0.03,
+        emissive: "#e0f2fe",
+        emissiveIntensity: 0.22,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    [],
+  );
+  const dummy = useRef(new THREE.Object3D());
+  const nozzle = useRef(new THREE.Vector3());
+  const impact = useRef(new THREE.Vector3());
+  const ctrl = useRef(new THREE.Vector3());
+  const side = useRef(new THREE.Vector3());
+  const chord = useRef(new THREE.Vector3());
   const samples = useMemo(
     () => Array.from({ length: JET_SAMPLES + 1 }, () => new THREE.Vector3()),
     [],
   );
-  const point = useMemo(() => new THREE.Vector3(), []);
-  const ahead = useMemo(() => new THREE.Vector3(), []);
-  const tangent = useMemo(() => new THREE.Vector3(), []);
-  const up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const point = useRef(new THREE.Vector3());
+  const ahead = useRef(new THREE.Vector3());
+  const tangent = useRef(new THREE.Vector3());
+  const up = useRef(new THREE.Vector3(0, 1, 0));
   const spot = mapToMission3D(fireFronts[0].center);
   const curve = useMemo(() => {
     const pts = Array.from(
@@ -935,12 +912,12 @@ function WaterStream() {
     const omt = 1 - u;
     out
       .set(0, 0, 0)
-      .addScaledVector(nozzle, omt * omt)
-      .addScaledVector(ctrl, 2 * omt * u)
-      .addScaledVector(impact, u * u);
+      .addScaledVector(nozzle.current, omt * omt)
+      .addScaledVector(ctrl.current, 2 * omt * u)
+      .addScaledVector(impact.current, u * u);
     const wobble = Math.sin(u * 20 + time * 9) * (0.04 + u * 0.28);
     const flutter = Math.sin(u * 11 - time * 7) * u * 0.16;
-    out.addScaledVector(side, wobble);
+    out.addScaledVector(side.current, wobble);
     out.y += flutter;
   };
 
@@ -959,17 +936,20 @@ function WaterStream() {
     if (!active) return;
 
     const [dx, dy, dz] = getDroneMissionPosition(elapsed);
-    nozzle.set(dx, dy - 0.62, dz);
-    impact.set(spot[0], heightAt(spot[0], spot[2]) + 0.2, spot[2]);
-    ctrl.copy(nozzle).lerp(impact, 0.36);
-    const span = nozzle.distanceTo(impact);
-    ctrl.y -= Math.min(7, 1.4 + span * 0.11);
-    ctrl.x += WIND_XZ.x * 2.8;
-    ctrl.z += WIND_XZ.z * 2.8;
+    nozzle.current.set(dx, dy - 0.48, dz);
+    impact.current.set(spot[0], heightAt(spot[0], spot[2]) + 0.2, spot[2]);
+    ctrl.current.copy(nozzle.current).lerp(impact.current, 0.36);
+    const span = nozzle.current.distanceTo(impact.current);
+    ctrl.current.y -= Math.min(7, 1.4 + span * 0.11);
+    ctrl.current.x += WIND_XZ.x * 2.8;
+    ctrl.current.z += WIND_XZ.z * 2.8;
 
-    side.crossVectors(chord.copy(impact).sub(nozzle), up);
-    if (side.lengthSq() < 1e-4) side.set(1, 0, 0);
-    side.normalize();
+    side.current.crossVectors(
+      chord.current.copy(impact.current).sub(nozzle.current),
+      up.current,
+    );
+    if (side.current.lengthSq() < 1e-4) side.current.set(1, 0, 0);
+    side.current.normalize();
 
     const time = clock.elapsedTime;
     for (let i = 0; i <= JET_SAMPLES; i++) {
@@ -984,33 +964,33 @@ function WaterStream() {
     );
     outerMesh.geometry = outerGeom;
     innerMesh.geometry = innerGeom;
-    jetMap.offset.x = -(time * 1.6) % 1;
+    jetMapRef.current.offset.x = -(time * 1.6) % 1;
 
     for (let i = 0; i < SPRAY_DROPS; i++) {
       const u = ((i + 0.37) / SPRAY_DROPS + time * 0.7) % 1;
-      sampleJet(Math.min(0.97, u), time, point);
-      sampleJet(Math.min(0.99, u + 0.025), time, ahead);
-      tangent.copy(ahead).sub(point);
-      if (tangent.lengthSq() < 1e-6) tangent.set(0, -1, 0);
-      tangent.normalize();
+      sampleJet(Math.min(0.97, u), time, point.current);
+      sampleJet(Math.min(0.99, u + 0.025), time, ahead.current);
+      tangent.current.copy(ahead.current).sub(point.current);
+      if (tangent.current.lengthSq() < 1e-6) tangent.current.set(0, -1, 0);
+      tangent.current.normalize();
       const spray = Math.pow(u, 1.35);
       const ang = i * 2.399963 + time * 1.6;
       const rad = (u < 0.4 ? 0.015 : 0.04) + spray * (0.16 + (i % 5) * 0.06);
-      point.x += Math.cos(ang) * rad;
-      point.y += Math.sin(ang * 1.7) * rad * 0.35;
-      point.z += Math.sin(ang) * rad;
-      dummy.position.copy(point);
-      dummy.quaternion.setFromUnitVectors(up, tangent);
+      point.current.x += Math.cos(ang) * rad;
+      point.current.y += Math.sin(ang * 1.7) * rad * 0.35;
+      point.current.z += Math.sin(ang) * rad;
+      dummy.current.position.copy(point.current);
+      dummy.current.quaternion.setFromUnitVectors(up.current, tangent.current);
       const bead = 0.09 + (i % 4) * 0.03 + spray * 0.04;
       const along = 0.55 + spray * 1.8;
-      dummy.scale.set(bead, bead * along, bead * 0.85);
-      dummy.updateMatrix();
-      dropMesh.setMatrixAt(i, dummy.matrix);
+      dummy.current.scale.set(bead, bead * along, bead * 0.85);
+      dummy.current.updateMatrix();
+      dropMesh.setMatrixAt(i, dummy.current.matrix);
     }
     dropMesh.instanceMatrix.needsUpdate = true;
 
     if (splash.current) {
-      splash.current.position.copy(impact);
+      splash.current.position.copy(impact.current);
       splash.current.children.forEach((child, i) => {
         if (child.name === "ring") {
           const mesh = child as THREE.Mesh;
@@ -1037,32 +1017,20 @@ function WaterStream() {
 
   return (
     <group>
-      <mesh ref={outer} visible={false} renderOrder={2} geometry={outerGeom}>
-        <meshStandardMaterial
-          map={jetMap}
-          color="#7dd3fc"
-          transparent
-          opacity={0.34}
-          roughness={0.08}
-          metalness={0.02}
-          emissive="#38bdf8"
-          emissiveIntensity={0.12}
-          depthWrite={false}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-      <mesh ref={inner} visible={false} renderOrder={3} geometry={innerGeom}>
-        <meshStandardMaterial
-          color="#f8fdff"
-          transparent
-          opacity={0.42}
-          roughness={0.04}
-          emissive="#e0f2fe"
-          emissiveIntensity={0.2}
-          depthWrite={false}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
+      <mesh
+        ref={outer}
+        visible={false}
+        renderOrder={2}
+        geometry={outerGeom}
+        material={outerJetMat}
+      />
+      <mesh
+        ref={inner}
+        visible={false}
+        renderOrder={3}
+        geometry={innerGeom}
+        material={innerJetMat}
+      />
       <instancedMesh ref={drops} args={[undefined, undefined, SPRAY_DROPS]} visible={false}>
         <capsuleGeometry args={[0.35, 1, 4, 6]} />
         <meshStandardMaterial
@@ -1101,9 +1069,24 @@ function WaterStream() {
           </mesh>
         ))}
         <mesh name="mist" position={[0, 0.7, 0]}>
-          <sphereGeometry args={[1.15, 12, 12]} />
-          <meshBasicMaterial color="#bae6fd" transparent opacity={0.12} depthWrite={false} />
+          <sphereGeometry args={[1.65, 12, 12]} />
+          <meshStandardMaterial
+            color="#bae6fd"
+            transparent
+            opacity={0.18}
+            emissive="#7dd3fc"
+            emissiveIntensity={0.15}
+            depthWrite={false}
+          />
         </mesh>
+        <Sparkles
+          count={24}
+          scale={[2.4, 2.2, 2.4]}
+          size={2.2}
+          speed={0.65}
+          opacity={0.35}
+          color="#e0f2fe"
+        />
       </group>
     </group>
   );
@@ -1138,158 +1121,43 @@ function FlightRibbon() {
   );
 }
 
-function Drone() {
-  const group = useRef<THREE.Group>(null);
-  const rotors = useRef<THREE.Group>(null);
-  const elapsed = usePlayback((s) => s.elapsed);
-  const prev = useRef(new THREE.Vector3());
-  const rotorBlur = useMemo(() => createRotorBlurTexture(), []);
-  const bodyMat = useMemo(
-    () =>
-      new THREE.MeshStandardMaterial({
-        color: "#1e293b",
-        metalness: 0.55,
-        roughness: 0.35,
-      }),
-    [],
-  );
-  const armMat = useMemo(
-    () =>
-      new THREE.MeshStandardMaterial({
-        color: "#334155",
-        metalness: 0.45,
-        roughness: 0.4,
-      }),
-    [],
-  );
-  const rotorMat = useMemo(
-    () =>
-      new THREE.MeshBasicMaterial({
-        map: rotorBlur,
-        transparent: true,
-        opacity: 0.82,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      }),
-    [rotorBlur],
-  );
-
-  useFrame((_, delta) => {
-    if (!group.current) return;
-    const [x, y, z] = getDroneMissionPosition(elapsed);
-    const next = new THREE.Vector3(x, y, z);
-    group.current.position.copy(next);
-
-    const vel = next.clone().sub(prev.current);
-    if (vel.lengthSq() > 0.0001) {
-      const yaw = Math.atan2(vel.x, vel.z);
-      group.current.rotation.y = THREE.MathUtils.lerp(
-        group.current.rotation.y,
-        yaw,
-        0.12,
-      );
-      const bank = THREE.MathUtils.clamp(-vel.x * 0.04, -0.35, 0.35);
-      group.current.rotation.z = THREE.MathUtils.lerp(
-        group.current.rotation.z,
-        bank,
-        0.1,
-      );
-    }
-    const pitch = THREE.MathUtils.clamp(-vel.y * 0.08, -0.42, 0.42);
-    group.current.rotation.x = THREE.MathUtils.lerp(
-      group.current.rotation.x,
-      pitch,
-      0.14,
-    );
-    prev.current.copy(next);
-
-    if (rotors.current) rotors.current.rotation.y += delta * 32;
-  });
-
-  const arm = 1.22;
-  const rotorPositions: [number, number, number][] = [
-    [arm, 0.12, arm],
-    [-arm, 0.12, arm],
-    [arm, 0.12, -arm],
-    [-arm, 0.12, -arm],
-  ];
-
-  return (
-    <group ref={group}>
-      <mesh castShadow position={[0, 0.05, 0]}>
-        <boxGeometry args={[0.95, 0.22, 0.95]} />
-        <primitive object={bodyMat} attach="material" />
-      </mesh>
-      <mesh castShadow position={[0, 0.18, 0]}>
-        <boxGeometry args={[0.55, 0.12, 0.55]} />
-        <meshStandardMaterial color="#0f172a" metalness={0.6} roughness={0.3} />
-      </mesh>
-      {rotorPositions.map(([rx, ry, rz], i) => (
-        <group key={i}>
-          <mesh position={[rx * 0.52, ry, rz * 0.52]} castShadow>
-            <boxGeometry args={[arm * 0.95, 0.06, 0.1]} />
-            <primitive object={armMat} attach="material" />
-          </mesh>
-          <mesh position={[rx, ry - 0.02, rz]}>
-            <cylinderGeometry args={[0.12, 0.14, 0.18, 8]} />
-            <meshStandardMaterial color="#475569" metalness={0.65} roughness={0.35} />
-          </mesh>
-        </group>
-      ))}
-      <group ref={rotors}>
-        {rotorPositions.map(([rx, ry, rz], i) => (
-          <mesh key={i} position={[rx, ry + 0.14, rz]} rotation={[Math.PI / 2, 0, 0]}>
-            <circleGeometry args={[0.62, 16]} />
-            <primitive object={rotorMat} attach="material" />
-          </mesh>
-        ))}
-      </group>
-      <mesh position={[0.42, 0.08, 0.42]}>
-        <sphereGeometry args={[0.06, 8, 8]} />
-        <meshStandardMaterial color="#ef4444" emissive="#dc2626" emissiveIntensity={1.2} />
-      </mesh>
-      <mesh position={[-0.42, 0.08, 0.42]}>
-        <sphereGeometry args={[0.06, 8, 8]} />
-        <meshStandardMaterial color="#22c55e" emissive="#16a34a" emissiveIntensity={0.9} />
-      </mesh>
-      <mesh position={[0, -0.12, 0.15]} rotation={[0.35, 0, 0]} castShadow>
-        <sphereGeometry args={[0.16, 12, 12]} />
-        <meshStandardMaterial
-          color="#0ea5e9"
-          emissive="#0284c7"
-          emissiveIntensity={0.45}
-          metalness={0.3}
-          roughness={0.25}
-        />
-      </mesh>
-      <mesh position={[-0.38, -0.28, 0]} castShadow>
-        <boxGeometry args={[0.08, 0.04, 0.55]} />
-        <meshStandardMaterial color="#64748b" metalness={0.5} roughness={0.45} />
-      </mesh>
-      <mesh position={[0.38, -0.28, 0]} castShadow>
-        <boxGeometry args={[0.08, 0.04, 0.55]} />
-        <meshStandardMaterial color="#64748b" metalness={0.5} roughness={0.45} />
-      </mesh>
-    </group>
-  );
-}
-
 function WindIndicator() {
   const rad = (WIND.directionDeg * Math.PI) / 180;
   const [px, pz] = PAD_XZ;
   const x = px + 12;
   const z = pz + 10;
   const y = heightAt(x, z);
+  const sock = useRef<THREE.Mesh>(null);
+
+  useFrame(({ clock }) => {
+    if (!sock.current) return;
+    const t = clock.elapsedTime;
+    sock.current.rotation.z = Math.sin(t * 2.4) * 0.35 + WIND_XZ.x * 0.2;
+    sock.current.rotation.x = Math.sin(t * 1.7 + 1) * 0.12;
+  });
+
   return (
     <group position={[x, y, z]} rotation={[0, -rad, 0]}>
-      <mesh position={[0, 3.2, 0]}>
-        <cylinderGeometry args={[0.08, 0.1, 6.4, 6]} />
-        <meshStandardMaterial color="#78716c" />
+      <mesh position={[0, 3.2, 0]} castShadow>
+        <cylinderGeometry args={[0.08, 0.1, 6.4, 8]} />
+        <meshStandardMaterial color="#78716c" metalness={0.35} roughness={0.55} />
       </mesh>
-      <mesh position={[0, 6.6, 0.8]} rotation={[Math.PI / 2, 0, 0]}>
-        <coneGeometry args={[0.7, 2.4, 5]} />
-        <meshStandardMaterial color="#fbbf24" emissive="#f59e0b" emissiveIntensity={0.45} />
-      </mesh>
+      <group position={[0, 6.55, 0]}>
+        <mesh position={[0, -0.35, 0]}>
+          <cylinderGeometry args={[0.05, 0.05, 0.7, 6]} />
+          <meshStandardMaterial color="#57534e" />
+        </mesh>
+        <mesh ref={sock} position={[0, -0.75, 0.35]} rotation={[Math.PI / 2, 0, 0]}>
+          <coneGeometry args={[0.32, 1.35, 12, 1, true]} />
+          <meshStandardMaterial
+            color="#ef4444"
+            emissive="#b91c1c"
+            emissiveIntensity={0.25}
+            roughness={0.85}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      </group>
     </group>
   );
 }
@@ -1302,16 +1170,20 @@ function MapWalk() {
     a: false,
     s: false,
     d: false,
-    q: false,
-    e: false,
+    arrowUp: false,
+    arrowDown: false,
+    arrowLeft: false,
+    arrowRight: false,
     shift: false,
     space: false,
     ctrl: false,
   });
-  const forward = useMemo(() => new THREE.Vector3(), []);
-  const right = useMemo(() => new THREE.Vector3(), []);
-  const delta = useMemo(() => new THREE.Vector3(), []);
-  const look = useMemo(() => new THREE.Vector3(), []);
+  const forward = useRef(new THREE.Vector3());
+  const right = useRef(new THREE.Vector3());
+  const delta = useRef(new THREE.Vector3());
+  const look = useRef(new THREE.Vector3());
+  const lookSpherical = useRef(new THREE.Spherical());
+  const pitchAxis = useRef(new THREE.Vector3());
 
   useEffect(() => {
     const typing = (target: EventTarget | null) =>
@@ -1326,8 +1198,10 @@ function MapWalk() {
       else if (e.code === "KeyA") keys.current.a = true;
       else if (e.code === "KeyS") keys.current.s = true;
       else if (e.code === "KeyD") keys.current.d = true;
-      else if (e.code === "KeyQ") keys.current.q = true;
-      else if (e.code === "KeyE") keys.current.e = true;
+      else if (e.code === "ArrowUp") keys.current.arrowUp = true;
+      else if (e.code === "ArrowDown") keys.current.arrowDown = true;
+      else if (e.code === "ArrowLeft") keys.current.arrowLeft = true;
+      else if (e.code === "ArrowRight") keys.current.arrowRight = true;
       else if (e.code === "ShiftLeft" || e.code === "ShiftRight") keys.current.shift = true;
       else if (e.code === "Space") keys.current.space = true;
       else if (e.code === "ControlLeft" || e.code === "ControlRight") keys.current.ctrl = true;
@@ -1339,8 +1213,10 @@ function MapWalk() {
       else if (e.code === "KeyA") keys.current.a = false;
       else if (e.code === "KeyS") keys.current.s = false;
       else if (e.code === "KeyD") keys.current.d = false;
-      else if (e.code === "KeyQ") keys.current.q = false;
-      else if (e.code === "KeyE") keys.current.e = false;
+      else if (e.code === "ArrowUp") keys.current.arrowUp = false;
+      else if (e.code === "ArrowDown") keys.current.arrowDown = false;
+      else if (e.code === "ArrowLeft") keys.current.arrowLeft = false;
+      else if (e.code === "ArrowRight") keys.current.arrowRight = false;
       else if (e.code === "ShiftLeft" || e.code === "ShiftRight") keys.current.shift = false;
       else if (e.code === "Space") keys.current.space = false;
       else if (e.code === "ControlLeft" || e.code === "ControlRight") keys.current.ctrl = false;
@@ -1350,8 +1226,10 @@ function MapWalk() {
       keys.current.a = false;
       keys.current.s = false;
       keys.current.d = false;
-      keys.current.q = false;
-      keys.current.e = false;
+      keys.current.arrowUp = false;
+      keys.current.arrowDown = false;
+      keys.current.arrowLeft = false;
+      keys.current.arrowRight = false;
       keys.current.shift = false;
       keys.current.space = false;
       keys.current.ctrl = false;
@@ -1370,40 +1248,67 @@ function MapWalk() {
     const controls = get().controls as { target?: THREE.Vector3 } | null;
     const target = controls?.target;
     if (!target) return;
-    const { w, a, s, d, q, e, shift, space, ctrl } = keys.current;
-    const turning = q !== e;
-    if (!w && !a && !s && !d && !shift && !space && !turning) return;
+    const {
+      w,
+      a,
+      s,
+      d,
+      arrowUp,
+      arrowDown,
+      arrowLeft,
+      arrowRight,
+      shift,
+      space,
+      ctrl,
+    } = keys.current;
+    const adjustingLook =
+      arrowLeft !== arrowRight || arrowUp !== arrowDown;
+    if (!w && !a && !s && !d && !shift && !space && !adjustingLook) return;
 
-    camera.getWorldDirection(forward);
-    forward.y = 0;
-    if (forward.lengthSq() < 0.04) {
-      forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-      forward.y = 0;
+    camera.getWorldDirection(forward.current);
+    forward.current.y = 0;
+    if (forward.current.lengthSq() < 0.04) {
+      forward.current.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      forward.current.y = 0;
     }
-    if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
-    forward.normalize();
+    if (forward.current.lengthSq() < 1e-6) forward.current.set(0, 0, -1);
+    forward.current.normalize();
 
-    right.set(1, 0, 0).applyQuaternion(camera.quaternion);
-    right.y = 0;
-    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
-    right.normalize();
+    right.current.set(1, 0, 0).applyQuaternion(camera.quaternion);
+    right.current.y = 0;
+    if (right.current.lengthSq() < 1e-6) right.current.set(1, 0, 0);
+    right.current.normalize();
 
-    delta.set(0, 0, 0);
-    if (w) delta.add(forward);
-    if (s) delta.sub(forward);
-    if (d) delta.add(right);
-    if (a) delta.sub(right);
+    delta.current.set(0, 0, 0);
+    if (w) delta.current.add(forward.current);
+    if (s) delta.current.sub(forward.current);
+    if (d) delta.current.add(right.current);
+    if (a) delta.current.sub(right.current);
 
     const speed = (ctrl ? 78 : 36) * dt;
-    if (delta.lengthSq() > 1e-8) delta.normalize().multiplyScalar(speed);
-    if (space) delta.y += speed;
-    if (shift) delta.y -= speed;
+    if (delta.current.lengthSq() > 1e-8) {
+      delta.current.normalize().multiplyScalar(speed);
+    }
+    if (space) delta.current.y += speed;
+    if (shift) delta.current.y -= speed;
 
     const limit = TERRAIN_SIZE / 2 - 6;
-    const nextX = THREE.MathUtils.clamp(camera.position.x + delta.x, -limit, limit);
-    const nextZ = THREE.MathUtils.clamp(camera.position.z + delta.z, -limit, limit);
+    const nextX = THREE.MathUtils.clamp(
+      camera.position.x + delta.current.x,
+      -limit,
+      limit,
+    );
+    const nextZ = THREE.MathUtils.clamp(
+      camera.position.z + delta.current.z,
+      -limit,
+      limit,
+    );
     const ground = heightAt(nextX, nextZ) + 2;
-    const nextY = THREE.MathUtils.clamp(camera.position.y + delta.y, ground, 180);
+    const nextY = THREE.MathUtils.clamp(
+      camera.position.y + delta.current.y,
+      ground,
+      180,
+    );
     const appliedX = nextX - camera.position.x;
     const appliedZ = nextZ - camera.position.z;
     const appliedY = nextY - camera.position.y;
@@ -1412,11 +1317,39 @@ function MapWalk() {
     target.y += appliedY;
     target.z += appliedZ;
 
-    if (turning) {
-      const yaw = (q ? 1 : -1) * 1.55 * dt;
-      look.subVectors(target, camera.position);
-      look.applyAxisAngle(Y_AXIS, yaw);
-      target.copy(camera.position).add(look);
+    if (adjustingLook) {
+      const turn = 1.55 * dt;
+      look.current.subVectors(target, camera.position);
+      if (look.current.lengthSq() < 1e-8) {
+        look.current.set(0, 0, -10);
+      }
+
+      if (arrowLeft !== arrowRight) {
+        const yaw = (arrowLeft ? 1 : -1) * turn;
+        look.current.applyAxisAngle(Y_AXIS, yaw);
+      }
+
+      if (arrowUp !== arrowDown) {
+        pitchAxis.current.crossVectors(look.current, Y_AXIS);
+        if (pitchAxis.current.lengthSq() < 1e-8) {
+          pitchAxis.current.set(1, 0, 0);
+        } else {
+          pitchAxis.current.normalize();
+        }
+        const pitch = (arrowUp ? 1 : -1) * turn;
+        look.current.applyAxisAngle(pitchAxis.current, pitch);
+      }
+
+      lookSpherical.current.setFromVector3(look.current);
+      const radius = lookSpherical.current.radius;
+      lookSpherical.current.phi = THREE.MathUtils.clamp(
+        lookSpherical.current.phi,
+        MAP_LOOK_PITCH_MIN,
+        MAP_LOOK_PITCH_MAX,
+      );
+      lookSpherical.current.radius = radius;
+      look.current.setFromSpherical(lookSpherical.current);
+      target.copy(camera.position).add(look.current);
     }
   });
 
@@ -1427,11 +1360,17 @@ function SceneContent() {
   const spot3 = mapToMission3D(fireFronts[0].center);
   const fireRadius = fireRadiusUnits(fireFronts[0].radiusM) * 3.1;
   const sunPos = useMemo(() => sunDirection().multiplyScalar(140), []);
+  const { shadowMapSize } = useMissionQuality();
 
   return (
     <>
       <color attach="background" args={["#7a9cb8"]} />
-      <fog attach="fog" args={["#9eb8cc", 160, 440]} />
+      <fog attach="fog" args={["#9eb8cc", 140, 420]} />
+      <Environment
+        files={MISSION_HDRI}
+        background={false}
+        environmentIntensity={0.45}
+      />
       <Sky
         distance={450000}
         sunPosition={SUN_POSITION.toArray()}
@@ -1441,14 +1380,13 @@ function SceneContent() {
         rayleigh={1.35}
         mieCoefficient={0.012}
       />
-      <hemisphereLight args={["#c8e4f4", "#243828", 0.52]} />
-      <ambientLight intensity={0.28} />
+      <ambientLight intensity={0.18} />
       <directionalLight
         castShadow
         position={sunPos.toArray()}
-        intensity={1.35}
+        intensity={1.45}
         color="#fff0dc"
-        shadow-mapSize={[2048, 2048]}
+        shadow-mapSize={[shadowMapSize, shadowMapSize]}
         shadow-bias={-0.00015}
         shadow-normalBias={0.02}
         shadow-camera-far={360}
@@ -1459,23 +1397,23 @@ function SceneContent() {
       />
       <Terrain />
       <CanalWater />
-      <GrassField />
-      <Forest />
+      <MissionGrassField />
+      <MissionForest />
       <LandingPad />
       <SoilSensors />
       <FireFront center={spot3} radius={fireRadius} />
       <WindIndicator />
       <FlightRibbon />
-      <Drone />
+      <MissionDroneModel />
       <WaterStream />
       <OrbitControls
         makeDefault
         enableRotate={false}
         enablePan={false}
         enableZoom={false}
-        enableDamping
-        dampingFactor={0.08}
-        maxPolarAngle={Math.PI / 2.08}
+        enableDamping={false}
+        minPolarAngle={MAP_ORBIT_POLAR_MIN}
+        maxPolarAngle={MAP_ORBIT_POLAR_MAX}
         target={MISSION_VIEW.target}
         maxDistance={280}
         minDistance={8}
@@ -1486,19 +1424,36 @@ function SceneContent() {
   );
 }
 
+function MissionSceneLoader() {
+  return (
+    <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#050810]/40">
+      <p className="font-mono text-xs tracking-widest text-cyan-200/80">
+        LOADING TERRAIN…
+      </p>
+    </div>
+  );
+}
+
 export function MissionScene() {
   return (
-    <Canvas
-      shadows={{ type: THREE.PCFSoftShadowMap }}
-      className="absolute inset-0 overflow-hidden"
-      gl={{
-        antialias: true,
-        toneMapping: THREE.NoToneMapping,
-      }}
-      dpr={[1, 1.75]}
-    >
-      <PerspectiveCamera makeDefault position={MISSION_VIEW.position} fov={50} />
-      <SceneContent />
-    </Canvas>
+    <MissionQualityProvider>
+      <Suspense fallback={<MissionSceneLoader />}>
+        <Canvas
+          shadows={{ type: THREE.PCFSoftShadowMap }}
+          className="absolute inset-0 overflow-hidden"
+          gl={{
+            antialias: true,
+            toneMapping: THREE.ACESFilmicToneMapping,
+            outputColorSpace: THREE.SRGBColorSpace,
+          }}
+          dpr={[1, 1.75]}
+        >
+          <MissionPerformance>
+            <PerspectiveCamera makeDefault position={MISSION_VIEW.position} fov={50} />
+            <SceneContent />
+          </MissionPerformance>
+        </Canvas>
+      </Suspense>
+    </MissionQualityProvider>
   );
 }
